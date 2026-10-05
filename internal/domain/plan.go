@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"strings"
 	"time"
 
 	"example.com/paleo-prep-station/internal/contracts"
@@ -17,18 +18,19 @@ const (
 )
 
 type PrepPlan struct {
-	ID             string     `json:"id"`
-	SpecimenID     string     `json:"specimen_id"`
-	Objective      string     `json:"objective"`
-	Method         string     `json:"method"`
-	Adhesive       string     `json:"adhesive"`
-	TargetExposure int        `json:"target_exposure"`
-	Status         PlanStatus `json:"status"`
-	ApprovedBy     string     `json:"approved_by,omitempty"`
-	ApprovedAt     *time.Time `json:"approved_at,omitempty"`
-	Version        int        `json:"version"`
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
+	ID             string          `json:"id"`
+	SpecimenID     string          `json:"specimen_id"`
+	Objective      string          `json:"objective"`
+	Method         string          `json:"method"`
+	Adhesive       string          `json:"adhesive"`
+	TargetExposure int             `json:"target_exposure"`
+	StandardMethod *MethodSnapshot `json:"standard_method,omitempty"`
+	Status         PlanStatus      `json:"status"`
+	ApprovedBy     string          `json:"approved_by,omitempty"`
+	ApprovedAt     *time.Time      `json:"approved_at,omitempty"`
+	Version        int             `json:"version"`
+	CreatedAt      time.Time       `json:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at"`
 }
 
 func NewPrepPlan(
@@ -38,6 +40,7 @@ func NewPrepPlan(
 	method string,
 	adhesive string,
 	targetExposure int,
+	standard *MethodSnapshot,
 	now time.Time,
 ) (PrepPlan, error) {
 	if id == "" {
@@ -50,7 +53,11 @@ func NewPrepPlan(
 	if err != nil {
 		return PrepPlan{}, err
 	}
-	approach, err := requiredText("修复方法", method, 160)
+	approach := strings.TrimSpace(method)
+	if approach == "" && standard != nil {
+		approach = standard.Name
+	}
+	approach, err = requiredText("修复方法", approach, 160)
 	if err != nil {
 		return PrepPlan{}, err
 	}
@@ -64,6 +71,20 @@ func NewPrepPlan(
 	if targetExposure == 0 {
 		return PrepPlan{}, contracts.Invalid("invalid_target_exposure", "目标暴露比例必须大于零")
 	}
+	if standard != nil {
+		if targetExposure < standard.TargetMin || targetExposure > standard.TargetMax {
+			return PrepPlan{}, contracts.Invalid(
+				"target_exposure_out_of_range",
+				"目标暴露比例超出所引用标准方法的目标边界",
+			)
+		}
+		if adhesiveValue != "" && !snapshotAllowsAdhesive(*standard, adhesiveValue) {
+			return PrepPlan{}, contracts.Invalid(
+				"adhesive_out_of_range",
+				"黏结材料超出所引用标准方法的材料范围",
+			)
+		}
+	}
 	return PrepPlan{
 		ID:             id,
 		SpecimenID:     specimen.ID,
@@ -71,11 +92,24 @@ func NewPrepPlan(
 		Method:         approach,
 		Adhesive:       adhesiveValue,
 		TargetExposure: targetExposure,
+		StandardMethod: standard,
 		Status:         PlanDraft,
 		Version:        1,
 		CreatedAt:      now.UTC(),
 		UpdatedAt:      now.UTC(),
 	}, nil
+}
+
+func snapshotAllowsAdhesive(snapshot MethodSnapshot, adhesive string) bool {
+	if len(snapshot.AllowedAdhesives) == 0 {
+		return true
+	}
+	for _, allowed := range snapshot.AllowedAdhesives {
+		if allowed == adhesive {
+			return true
+		}
+	}
+	return false
 }
 
 func (p PrepPlan) IsOpen() bool {

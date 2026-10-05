@@ -2,6 +2,7 @@ package station
 
 import (
 	"context"
+	"strings"
 
 	"example.com/paleo-prep-station/internal/contracts"
 	"example.com/paleo-prep-station/internal/domain"
@@ -26,6 +27,10 @@ func (s *Service) CreatePlan(
 		if m.HasOpenPlan(specimenID) {
 			return contracts.Conflict("open_plan_exists", "该标本已存在未结束的修复方案")
 		}
+		snapshot, err := resolveMethodSnapshot(m, request.MethodCode)
+		if err != nil {
+			return err
+		}
 		plan, err := domain.NewPrepPlan(
 			s.nextID("plan"),
 			specimen,
@@ -33,6 +38,7 @@ func (s *Service) CreatePlan(
 			request.Method,
 			request.Adhesive,
 			request.TargetExposure,
+			snapshot,
 			s.now(),
 		)
 		if err != nil {
@@ -47,6 +53,28 @@ func (s *Service) CreatePlan(
 		return nil
 	})
 	return created, err
+}
+
+// resolveMethodSnapshot pins the currently effective edition of the
+// referenced standard method. The frozen copy travels with the plan, so
+// later method revisions never rewrite existing plans.
+func resolveMethodSnapshot(
+	m *repository.Mutation,
+	methodCode string,
+) (*domain.MethodSnapshot, error) {
+	if strings.TrimSpace(methodCode) == "" {
+		return nil, nil
+	}
+	method, ok := m.FindMethodByCode(normalizeMethodCode(methodCode))
+	if !ok {
+		return nil, notFoundMethod(methodCode)
+	}
+	effective, ok := method.EffectiveVersion()
+	if !ok {
+		return nil, contracts.Conflict("method_not_effective", "所引用的标准方法当前没有已发布的有效版本")
+	}
+	snapshot := effective.Snapshot(method.Code, method.Name)
+	return &snapshot, nil
 }
 
 func (s *Service) ApprovePlan(

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync"
 	"time"
 
 	"example.com/paleo-prep-station/internal/contracts"
@@ -24,10 +25,17 @@ type specimenView struct {
 	Status        string `json:"status"`
 }
 
+type standardMethodView struct {
+	Code    string   `json:"code"`
+	Version int      `json:"version"`
+	Steps   []string `json:"steps"`
+}
+
 type planView struct {
-	ID         string `json:"id"`
-	SpecimenID string `json:"specimen_id"`
-	Status     string `json:"status"`
+	ID             string              `json:"id"`
+	SpecimenID     string              `json:"specimen_id"`
+	Status         string              `json:"status"`
+	StandardMethod *standardMethodView `json:"standard_method"`
 }
 
 type planSnapshot struct {
@@ -40,6 +48,18 @@ type planSnapshot struct {
 type releaseView struct {
 	ID         string `json:"id"`
 	SpecimenID string `json:"specimen_id"`
+}
+
+type methodVersionView struct {
+	Version int      `json:"version"`
+	Status  string   `json:"status"`
+	Steps   []string `json:"steps"`
+}
+
+type methodView struct {
+	ID       string              `json:"id"`
+	Code     string              `json:"code"`
+	Versions []methodVersionView `json:"versions"`
 }
 
 func main() {
@@ -170,19 +190,29 @@ func run(workflow string) error {
 			return fmt.Errorf("expected available specimen, got %s", fetched.Status)
 		}
 		return nil
+	case "reference-standard-method":
+		return checkReferenceStandardMethod(client, server.URL)
+
+	case "govern-method-versions":
+		return checkGovernMethodVersions(client, server.URL)
+
 	default:
 		return fmt.Errorf("unknown workflow %q", workflow)
 	}
 }
 
 func registerSpecimen(client *http.Client, baseURL string) (specimenView, error) {
+	return registerSpecimenWithCatalog(client, baseURL, "PPS-2026-001")
+}
+
+func registerSpecimenWithCatalog(client *http.Client, baseURL, catalog string) (specimenView, error) {
 	var specimen specimenView
 	err := requestJSON(
 		client,
 		http.MethodPost,
 		baseURL+"/specimens",
 		contracts.RegisterSpecimenRequest{
-			CatalogNumber: "PPS-2026-001",
+			CatalogNumber: catalog,
 			FieldLabel:    "北坡-07",
 			TaxonHint:     "大型脊椎动物",
 			MatrixKind:    "粉砂岩",
@@ -260,32 +290,12 @@ func requestJSON(
 	wantStatus int,
 	target any,
 ) error {
-	var payload io.Reader
-	if body != nil {
-		encoded, err := json.Marshal(body)
-		if err != nil {
-			return err
-		}
-		payload = bytes.NewReader(encoded)
-	}
-	request, err := http.NewRequest(method, url, payload)
+	raw, status, err := requestRaw(client, method, url, body)
 	if err != nil {
 		return err
 	}
-	if body != nil {
-		request.Header.Set("Content-Type", "application/json")
-	}
-	response, err := client.Do(request)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
-	if err != nil {
-		return err
-	}
-	if response.StatusCode != wantStatus {
-		return fmt.Errorf("request %s %s returned %d: %s", method, url, response.StatusCode, string(raw))
+	if status != wantStatus {
+		return fmt.Errorf("request %s %s returned %d: %s", method, url, status, string(raw))
 	}
 	if target == nil || len(raw) == 0 {
 		return nil
@@ -294,4 +304,425 @@ func requestJSON(
 		return fmt.Errorf("decode response for %s %s: %w", method, url, err)
 	}
 	return nil
+}
+
+func requestRaw(client *http.Client, method string, url string, body any) ([]byte, int, error) {
+	var payload io.Reader
+	if body != nil {
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			return nil, 0, err
+		}
+		payload = bytes.NewReader(encoded)
+	}
+	request, err := http.NewRequest(method, url, payload)
+	if err != nil {
+		return nil, 0, err
+	}
+	if body != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer response.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	if err != nil {
+		return nil, 0, err
+	}
+	return raw, response.StatusCode, nil
+}
+
+// checkReferenceStandardMethod verifies that a plan can pin the effective
+// edition of a standard method and that later revisions never rewrite it.
+func checkReferenceStandardMethod(client *http.Client, baseURL string) error {
+	method, err := createStandardMethod(client, baseURL, "MECH-PREP")
+	if err != nil {
+		return err
+	}
+	if len(method.Versions) != 1 || method.Versions[0].Status != "draft" {
+		return errors.New("new standard method must start with one draft version")
+	}
+
+	specimen, err := registerSpecimenWithCatalog(client, baseURL, "PPS-2026-101")
+	if err != nil {
+		return err
+	}
+	if _, err := createPlanExpecting(
+		client,
+		baseURL,
+		specimen.ID,
+		contracts.CreatePlanRequest{
+			Objective:      "暴露主要关节面",
+			TargetExposure: 60,
+			MethodCode:     "MECH-PREP",
+		},
+		http.StatusConflict,
+	); err != nil {
+		return fmt.Errorf("referencing an unpublished method must conflict: %w", err)
+	}
+
+	published, err := publishMethod(client, baseURL, "MECH-PREP", 1, http.StatusOK)
+	if err != nil {
+		return err
+	}
+	if published.Versions[0].Status != "published" {
+		return fmt.Errorf("expected published version, got %s", published.Versions[0].Status)
+	}
+
+	plan, err := createPlanExpecting(
+		client,
+		baseURL,
+		specimen.ID,
+		contracts.CreatePlanRequest{
+			Objective:      "暴露主要关节面",
+			Adhesive:       "可逆树脂",
+			TargetExposure: 60,
+			MethodCode:     "MECH-PREP",
+		},
+		http.StatusCreated,
+	)
+	if err != nil {
+		return err
+	}
+	if plan.StandardMethod == nil || plan.StandardMethod.Version != 1 {
+		return errors.New("plan must pin version 1 of the referenced standard method")
+	}
+	if len(plan.StandardMethod.Steps) != 2 || plan.StandardMethod.Steps[0] != "标记暴露基准线" {
+		return errors.New("plan must freeze the steps of the referenced edition")
+	}
+
+	outOfRange, err := registerSpecimenWithCatalog(client, baseURL, "PPS-2026-102")
+	if err != nil {
+		return err
+	}
+	if _, err := createPlanExpecting(
+		client,
+		baseURL,
+		outOfRange.ID,
+		contracts.CreatePlanRequest{
+			Objective:      "暴露主要关节面",
+			TargetExposure: 95,
+			MethodCode:     "MECH-PREP",
+		},
+		http.StatusBadRequest,
+	); err != nil {
+		return fmt.Errorf("target exposure outside the pinned bounds must be rejected: %w", err)
+	}
+
+	wrongAdhesive, err := registerSpecimenWithCatalog(client, baseURL, "PPS-2026-103")
+	if err != nil {
+		return err
+	}
+	if _, err := createPlanExpecting(
+		client,
+		baseURL,
+		wrongAdhesive.ID,
+		contracts.CreatePlanRequest{
+			Objective:      "暴露主要关节面",
+			Adhesive:       "快干环氧",
+			TargetExposure: 60,
+			MethodCode:     "MECH-PREP",
+		},
+		http.StatusBadRequest,
+	); err != nil {
+		return fmt.Errorf("adhesive outside the pinned material range must be rejected: %w", err)
+	}
+
+	if _, err := draftMethodVersion(client, baseURL, "MECH-PREP", []string{"整体加固后翻模"}, 30, 70); err != nil {
+		return err
+	}
+	if _, err := publishMethod(client, baseURL, "MECH-PREP", 2, http.StatusOK); err != nil {
+		return err
+	}
+
+	var snapshot planSnapshot
+	if err := requestJSON(client, http.MethodGet, baseURL+"/plans/"+plan.ID, nil, http.StatusOK, &snapshot); err != nil {
+		return err
+	}
+	if snapshot.Plan.StandardMethod == nil || snapshot.Plan.StandardMethod.Version != 1 {
+		return errors.New("method revision must not rewrite an existing plan")
+	}
+	if len(snapshot.Plan.StandardMethod.Steps) != 2 {
+		return errors.New("method revision must not replace the frozen steps of an existing plan")
+	}
+	return nil
+}
+
+// checkGovernMethodVersions verifies lifecycle conflicts and deterministic
+// outcomes for duplicate publishes and concurrent references.
+func checkGovernMethodVersions(client *http.Client, baseURL string) error {
+	if _, err := createStandardMethod(client, baseURL, "GOV-METHOD"); err != nil {
+		return err
+	}
+	var duplicated methodView
+	if err := requestJSON(
+		client,
+		http.MethodPost,
+		baseURL+"/methods",
+		contracts.CreateMethodRequest{
+			Code:      "GOV-METHOD",
+			Name:      "重复编码方法",
+			Steps:     []string{"清修"},
+			TargetMin: 10,
+			TargetMax: 90,
+		},
+		http.StatusConflict,
+		&duplicated,
+	); err != nil {
+		return fmt.Errorf("duplicate method code must conflict: %w", err)
+	}
+
+	if _, err := publishMethod(client, baseURL, "GOV-METHOD", 1, http.StatusOK); err != nil {
+		return err
+	}
+	if _, err := publishMethod(client, baseURL, "GOV-METHOD", 1, http.StatusConflict); err != nil {
+		return fmt.Errorf("duplicate publish must conflict deterministically: %w", err)
+	}
+
+	if _, err := draftMethodVersion(client, baseURL, "GOV-METHOD", []string{"二次清修"}, 20, 80); err != nil {
+		return err
+	}
+	var secondDraft methodView
+	if err := requestJSON(
+		client,
+		http.MethodPost,
+		baseURL+"/methods/GOV-METHOD/versions",
+		contracts.MethodDraftRequest{Steps: []string{"三次清修"}, TargetMin: 20, TargetMax: 80},
+		http.StatusConflict,
+		&secondDraft,
+	); err != nil {
+		return fmt.Errorf("a second open draft must conflict: %w", err)
+	}
+
+	statuses := runConcurrent(2, func(_ int) (int, error) {
+		_, status, err := requestRaw(
+			client,
+			http.MethodPost,
+			baseURL+"/methods/GOV-METHOD/versions/2/publish",
+			contracts.PublishMethodRequest{PublishedBy: "curator-lin"},
+		)
+		return status, err
+	})
+	okCount, conflictCount := countStatuses(statuses, http.StatusOK), countStatuses(statuses, http.StatusConflict)
+	if okCount != 1 || conflictCount != 1 {
+		return fmt.Errorf("concurrent duplicate publish must yield exactly one success, got %v", statuses)
+	}
+
+	method, err := getMethod(client, baseURL, "GOV-METHOD")
+	if err != nil {
+		return err
+	}
+	if method.Versions[0].Status != "retired" || method.Versions[1].Status != "published" {
+		return fmt.Errorf("publishing a new edition must retire the previous one, got %+v", method.Versions)
+	}
+
+	if _, err := retireMethod(client, baseURL, "GOV-METHOD", 2, http.StatusOK); err != nil {
+		return err
+	}
+	if _, err := retireMethod(client, baseURL, "GOV-METHOD", 2, http.StatusConflict); err != nil {
+		return fmt.Errorf("duplicate retire must conflict deterministically: %w", err)
+	}
+
+	retiredSpecimen, err := registerSpecimenWithCatalog(client, baseURL, "PPS-2026-201")
+	if err != nil {
+		return err
+	}
+	if _, err := createPlanExpecting(
+		client,
+		baseURL,
+		retiredSpecimen.ID,
+		contracts.CreatePlanRequest{
+			Objective:      "暴露主要关节面",
+			TargetExposure: 50,
+			MethodCode:     "GOV-METHOD",
+		},
+		http.StatusConflict,
+	); err != nil {
+		return fmt.Errorf("referencing a method without an effective version must conflict: %w", err)
+	}
+
+	if _, err := createStandardMethod(client, baseURL, "CONC-METHOD"); err != nil {
+		return err
+	}
+	if _, err := publishMethod(client, baseURL, "CONC-METHOD", 1, http.StatusOK); err != nil {
+		return err
+	}
+	const concurrentPlans = 6
+	specimens := make([]specimenView, 0, concurrentPlans)
+	for i := 0; i < concurrentPlans; i++ {
+		specimen, err := registerSpecimenWithCatalog(client, baseURL, fmt.Sprintf("PPS-2026-3%02d", i))
+		if err != nil {
+			return err
+		}
+		specimens = append(specimens, specimen)
+	}
+	planStatuses := runConcurrent(concurrentPlans, func(i int) (int, error) {
+		_, status, err := requestRaw(
+			client,
+			http.MethodPost,
+			baseURL+"/specimens/"+specimens[i].ID+"/plans",
+			contracts.CreatePlanRequest{
+				Objective:      "暴露主要关节面",
+				TargetExposure: 60,
+				MethodCode:     "CONC-METHOD",
+			},
+		)
+		return status, err
+	})
+	if countStatuses(planStatuses, http.StatusCreated) != concurrentPlans {
+		return fmt.Errorf("concurrent references must all succeed, got %v", planStatuses)
+	}
+	var listed struct {
+		Items []planView `json:"items"`
+	}
+	if err := requestJSON(client, http.MethodGet, baseURL+"/specimens/"+specimens[0].ID+"/plans", nil, http.StatusOK, &listed); err != nil {
+		return err
+	}
+	if len(listed.Items) != 1 || listed.Items[0].StandardMethod == nil || listed.Items[0].StandardMethod.Version != 1 {
+		return errors.New("concurrent references must pin the same effective version")
+	}
+	return nil
+}
+
+func createStandardMethod(client *http.Client, baseURL, code string) (methodView, error) {
+	var method methodView
+	err := requestJSON(
+		client,
+		http.MethodPost,
+		baseURL+"/methods",
+		contracts.CreateMethodRequest{
+			Code:             code,
+			Name:             "机械清修标准",
+			Description:      "常规基质机械清修流程",
+			Steps:            []string{"标记暴露基准线", "气动笔逐层剥离"},
+			AllowedAdhesives: []string{"可逆树脂", "骨胶"},
+			TargetMin:        40,
+			TargetMax:        80,
+		},
+		http.StatusCreated,
+		&method,
+	)
+	return method, err
+}
+
+func getMethod(client *http.Client, baseURL, code string) (methodView, error) {
+	var method methodView
+	err := requestJSON(client, http.MethodGet, baseURL+"/methods/"+code, nil, http.StatusOK, &method)
+	return method, err
+}
+
+func draftMethodVersion(
+	client *http.Client,
+	baseURL string,
+	code string,
+	steps []string,
+	targetMin int,
+	targetMax int,
+) (methodView, error) {
+	var method methodView
+	err := requestJSON(
+		client,
+		http.MethodPost,
+		baseURL+"/methods/"+code+"/versions",
+		contracts.MethodDraftRequest{
+			Steps:            steps,
+			AllowedAdhesives: []string{"可逆树脂"},
+			TargetMin:        targetMin,
+			TargetMax:        targetMax,
+		},
+		http.StatusCreated,
+		&method,
+	)
+	return method, err
+}
+
+func publishMethod(
+	client *http.Client,
+	baseURL string,
+	code string,
+	version int,
+	wantStatus int,
+) (methodView, error) {
+	var method methodView
+	err := requestJSON(
+		client,
+		http.MethodPost,
+		fmt.Sprintf("%s/methods/%s/versions/%d/publish", baseURL, code, version),
+		contracts.PublishMethodRequest{PublishedBy: "curator-lin"},
+		wantStatus,
+		&method,
+	)
+	return method, err
+}
+
+func retireMethod(
+	client *http.Client,
+	baseURL string,
+	code string,
+	version int,
+	wantStatus int,
+) (methodView, error) {
+	var method methodView
+	err := requestJSON(
+		client,
+		http.MethodPost,
+		fmt.Sprintf("%s/methods/%s/versions/%d/retire", baseURL, code, version),
+		contracts.RetireMethodRequest{RetiredBy: "curator-lin"},
+		wantStatus,
+		&method,
+	)
+	return method, err
+}
+
+func createPlanExpecting(
+	client *http.Client,
+	baseURL string,
+	specimenID string,
+	payload contracts.CreatePlanRequest,
+	wantStatus int,
+) (planView, error) {
+	var plan planView
+	err := requestJSON(
+		client,
+		http.MethodPost,
+		baseURL+"/specimens/"+specimenID+"/plans",
+		payload,
+		wantStatus,
+		&plan,
+	)
+	return plan, err
+}
+
+func runConcurrent(count int, fn func(i int) (int, error)) []int {
+	statuses := make([]int, count)
+	errs := make([]error, count)
+	var wg sync.WaitGroup
+	for i := 0; i < count; i++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			status, err := fn(index)
+			statuses[index] = status
+			errs[index] = err
+		}(i)
+	}
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			statuses = append(statuses, -1)
+		}
+	}
+	return statuses
+}
+
+func countStatuses(statuses []int, want int) int {
+	count := 0
+	for _, status := range statuses {
+		if status == want {
+			count++
+		}
+	}
+	return count
 }

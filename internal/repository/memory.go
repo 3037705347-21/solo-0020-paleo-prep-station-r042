@@ -12,6 +12,7 @@ type state struct {
 	plans     map[string]domain.PrepPlan
 	progress  map[string][]domain.ProgressEntry
 	releases  map[string]domain.ReleaseRecord
+	methods   map[string]domain.MethodStandard
 }
 
 type MemoryRepository struct {
@@ -26,6 +27,7 @@ func NewMemory() *MemoryRepository {
 			plans:     make(map[string]domain.PrepPlan),
 			progress:  make(map[string][]domain.ProgressEntry),
 			releases:  make(map[string]domain.ReleaseRecord),
+			methods:   make(map[string]domain.MethodStandard),
 		},
 	}
 }
@@ -54,6 +56,7 @@ func cloneMutation(source state) *Mutation {
 		plans:     make(map[string]domain.PrepPlan, len(source.plans)),
 		progress:  make(map[string][]domain.ProgressEntry, len(source.progress)),
 		releases:  make(map[string]domain.ReleaseRecord, len(source.releases)),
+		methods:   make(map[string]domain.MethodStandard, len(source.methods)),
 	}
 	for key, value := range source.specimens {
 		copied.specimens[key] = value
@@ -66,6 +69,10 @@ func cloneMutation(source state) *Mutation {
 	}
 	for key, value := range source.releases {
 		copied.releases[key] = value
+	}
+	for key, value := range source.methods {
+		value.Versions = append([]domain.MethodVersion(nil), value.Versions...)
+		copied.methods[key] = value
 	}
 	return &Mutation{state: copied}
 }
@@ -163,4 +170,36 @@ func (m *Mutation) ReleaseForSpecimen(specimenID string) (domain.ReleaseRecord, 
 
 func (m *Mutation) PutRelease(value domain.ReleaseRecord) {
 	m.state.releases[value.ID] = value
+}
+
+func (m *Mutation) GetMethod(id string) (domain.MethodStandard, bool) {
+	value, ok := m.state.methods[id]
+	return value, ok
+}
+
+func (m *Mutation) FindMethodByCode(code string) (domain.MethodStandard, bool) {
+	for _, value := range m.state.methods {
+		if value.Code == code {
+			return value, true
+		}
+	}
+	return domain.MethodStandard{}, false
+}
+
+func (m *Mutation) ListMethods() []domain.MethodStandard {
+	values := make([]domain.MethodStandard, 0, len(m.state.methods))
+	for _, value := range m.state.methods {
+		values = append(values, value)
+	}
+	sort.Slice(values, func(i, j int) bool {
+		if values[i].CreatedAt.Equal(values[j].CreatedAt) {
+			return values[i].ID < values[j].ID
+		}
+		return values[i].CreatedAt.Before(values[j].CreatedAt)
+	})
+	return values
+}
+
+func (m *Mutation) PutMethod(value domain.MethodStandard) {
+	m.state.methods[value.ID] = value
 }

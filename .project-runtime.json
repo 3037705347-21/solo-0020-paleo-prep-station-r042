@@ -26,6 +26,14 @@
     {
       "workflow_id": "release-for-study",
       "command": "go run ./cmd/workflowcheck --workflow release-for-study"
+    },
+    {
+      "workflow_id": "reference-standard-method",
+      "command": "go run ./cmd/workflowcheck --workflow reference-standard-method"
+    },
+    {
+      "workflow_id": "govern-method-versions",
+      "command": "go run ./cmd/workflowcheck --workflow govern-method-versions"
     }
   ]
 }

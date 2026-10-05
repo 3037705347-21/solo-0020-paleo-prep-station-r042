@@ -42,6 +42,20 @@ func validateCatalogNumber(value string) (string, error) {
 	return strings.ToUpper(cleaned), nil
 }
 
+func validateMethodCode(value string) (string, error) {
+	cleaned, err := requiredText("方法编码", value, 64)
+	if err != nil {
+		return "", err
+	}
+	if !catalogPattern.MatchString(cleaned) {
+		return "", contracts.Invalid(
+			"invalid_method_code",
+			"方法编码只能包含字母、数字、点、下划线和连字符",
+		)
+	}
+	return strings.ToUpper(cleaned), nil
+}
+
 func validatePercent(value int) error {
 	if value < 0 || value > 100 {
 		return contracts.Invalid("invalid_percent", "进度比例必须位于 0 到 100 之间")
