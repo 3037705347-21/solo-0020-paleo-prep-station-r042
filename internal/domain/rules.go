@@ -8,6 +8,21 @@ import (
 )
 
 var catalogPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{1,63}$`)
+var methodCodePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9._-]{1,31}$`)
+
+func validateMethodCode(value string) (string, error) {
+	cleaned, err := requiredText("方法编码", value, 32)
+	if err != nil {
+		return "", err
+	}
+	if !methodCodePattern.MatchString(cleaned) {
+		return "", contracts.Invalid(
+			"invalid_method_code",
+			"方法编码需以字母开头，只能包含字母、数字、点、下划线和连字符",
+		)
+	}
+	return strings.ToUpper(cleaned), nil
+}
 
 func requiredText(field, value string, max int) (string, error) {
 	cleaned := strings.TrimSpace(value)

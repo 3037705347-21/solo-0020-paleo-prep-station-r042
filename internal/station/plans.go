@@ -26,6 +26,32 @@ func (s *Service) CreatePlan(
 		if m.HasOpenPlan(specimenID) {
 			return contracts.Conflict("open_plan_exists", "该标本已存在未结束的修复方案")
 		}
+		var frozen *domain.FrozenMethod
+		if request.MethodRef != nil {
+			method, found := m.GetMethod(request.MethodRef.MethodID)
+			if !found {
+				return notFoundMethod(request.MethodRef.MethodID)
+			}
+			number := request.MethodRef.Version
+			if number == 0 {
+				current, ok := method.Current()
+				if !ok {
+					return contracts.Conflict("method_version_not_effective", "该方法没有当前有效版本")
+				}
+				number = current.Number
+			}
+			version, found := method.Version(number)
+			if !found {
+				return contracts.NotFound("method_version_not_found", "未找到方法版本")
+			}
+			// AsReference only accepts the effective version and returns a
+			// copy that the plan owns; later method revisions cannot reach it.
+			reference, err := version.AsReference(method)
+			if err != nil {
+				return err
+			}
+			frozen = &reference
+		}
 		plan, err := domain.NewPrepPlan(
 			s.nextID("plan"),
 			specimen,
@@ -33,6 +59,7 @@ func (s *Service) CreatePlan(
 			request.Method,
 			request.Adhesive,
 			request.TargetExposure,
+			frozen,
 			s.now(),
 		)
 		if err != nil {

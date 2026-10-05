@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"strings"
 	"time"
 
 	"example.com/paleo-prep-station/internal/contracts"
@@ -17,18 +18,22 @@ const (
 )
 
 type PrepPlan struct {
-	ID             string     `json:"id"`
-	SpecimenID     string     `json:"specimen_id"`
-	Objective      string     `json:"objective"`
-	Method         string     `json:"method"`
-	Adhesive       string     `json:"adhesive"`
-	TargetExposure int        `json:"target_exposure"`
-	Status         PlanStatus `json:"status"`
-	ApprovedBy     string     `json:"approved_by,omitempty"`
-	ApprovedAt     *time.Time `json:"approved_at,omitempty"`
-	Version        int        `json:"version"`
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
+	ID             string `json:"id"`
+	SpecimenID     string `json:"specimen_id"`
+	Objective      string `json:"objective"`
+	Method         string `json:"method"`
+	Adhesive       string `json:"adhesive"`
+	TargetExposure int    `json:"target_exposure"`
+	// MethodRef is the immutable snapshot of the standard method version
+	// referenced at creation time. It is owned by the plan and is never
+	// updated when the method library publishes a new version.
+	MethodRef  *FrozenMethod `json:"method_ref,omitempty"`
+	Status     PlanStatus    `json:"status"`
+	ApprovedBy string        `json:"approved_by,omitempty"`
+	ApprovedAt *time.Time    `json:"approved_at,omitempty"`
+	Version    int           `json:"version"`
+	CreatedAt  time.Time     `json:"created_at"`
+	UpdatedAt  time.Time     `json:"updated_at"`
 }
 
 func NewPrepPlan(
@@ -38,6 +43,7 @@ func NewPrepPlan(
 	method string,
 	adhesive string,
 	targetExposure int,
+	methodRef *FrozenMethod,
 	now time.Time,
 ) (PrepPlan, error) {
 	if id == "" {
@@ -50,7 +56,11 @@ func NewPrepPlan(
 	if err != nil {
 		return PrepPlan{}, err
 	}
-	approach, err := requiredText("修复方法", method, 160)
+	approach := strings.TrimSpace(method)
+	if methodRef != nil && approach == "" {
+		approach = methodRef.Name
+	}
+	approach, err = requiredText("修复方法", approach, 160)
 	if err != nil {
 		return PrepPlan{}, err
 	}
@@ -58,11 +68,21 @@ func NewPrepPlan(
 	if err != nil {
 		return PrepPlan{}, err
 	}
+	if methodRef != nil && adhesiveValue != "" && len(methodRef.Materials) > 0 {
+		if !containsText(methodRef.Materials, adhesiveValue) {
+			return PrepPlan{}, contracts.Invalid("adhesive_out_of_scope", "黏结材料不在该方法版本允许的材料范围内")
+		}
+	}
 	if err := validatePercent(targetExposure); err != nil {
 		return PrepPlan{}, contracts.Invalid("invalid_target_exposure", "目标暴露比例必须位于 0 到 100 之间")
 	}
 	if targetExposure == 0 {
 		return PrepPlan{}, contracts.Invalid("invalid_target_exposure", "目标暴露比例必须大于零")
+	}
+	if methodRef != nil {
+		if targetExposure < methodRef.Boundary.Min || targetExposure > methodRef.Boundary.Max {
+			return PrepPlan{}, contracts.Invalid("target_exposure_out_of_boundary", "目标暴露比例超出该方法版本的目标边界")
+		}
 	}
 	return PrepPlan{
 		ID:             id,
@@ -71,11 +91,31 @@ func NewPrepPlan(
 		Method:         approach,
 		Adhesive:       adhesiveValue,
 		TargetExposure: targetExposure,
+		MethodRef:      cloneMethodRef(methodRef),
 		Status:         PlanDraft,
 		Version:        1,
 		CreatedAt:      now.UTC(),
 		UpdatedAt:      now.UTC(),
 	}, nil
+}
+
+func containsText(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func cloneMethodRef(ref *FrozenMethod) *FrozenMethod {
+	if ref == nil {
+		return nil
+	}
+	frozen := *ref
+	frozen.Steps = append([]MethodStep(nil), ref.Steps...)
+	frozen.Materials = append([]string(nil), ref.Materials...)
+	return &frozen
 }
 
 func (p PrepPlan) IsOpen() bool {

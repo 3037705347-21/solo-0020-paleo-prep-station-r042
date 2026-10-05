@@ -1,16 +1,16 @@
 # 古生物修复制备台
 
-古生物修复制备台是一个使用 Go 编写的后端基线，用于记录化石标本、审批修复方案、回填制备进度，并在全部工序完成后办理研究借阅放行。
+古生物修复制备台是一个使用 Go 编写的后端基线，用于记录化石标本、维护标准修复方法库、审批修复方案、回填制备进度，并在全部工序完成后办理研究借阅放行。
 
 该服务只使用进程内仓储，便于在本机重复启动和检查。它不依赖数据库、远端接口或其他在线资源。
 
 ## 目录
 
 - `cmd/paleo-prep-station`：HTTP 服务入口和监听参数。
-- `cmd/workflowcheck`：通过真实 HTTP 处理器执行四条业务链路的本地验证命令。
+- `cmd/workflowcheck`：通过真实 HTTP 处理器执行业务链路的本地验证命令。
 - `internal/httpapi`：路由、请求解码、状态码映射和 JSON 输出。
 - `internal/station`：跨领域对象的编排、事务边界和业务流程。
-- `internal/domain`：标本、方案、进度和放行记录的状态与不变量。
+- `internal/domain`：标准方法、标本、方案、进度和放行记录的状态与不变量。
 - `internal/repository`：互斥保护的内存仓储和原子提交。
 - `internal/contracts`：稳定错误模型和公共请求结构。
 
@@ -32,6 +32,14 @@ go run ./cmd/paleo-prep-station --addr 127.0.0.1:18133
 - `POST /plans/{id}/approval`
 - `POST /plans/{id}/progress`
 - `POST /specimens/{id}/release`
+- `GET /methods` 与 `POST /methods`
+- `GET /methods/{id}`
+- `POST /methods/{id}/versions`
+- `PUT /methods/{id}/versions/{version}/draft`
+- `POST /methods/{id}/versions/{version}/publish`
+- `POST /methods/{id}/versions/{version}/retire`
+
+创建方案时请求体可携带 `method_ref`：`{"method_id":"...", "version":1}`，省略 `version` 表示引用当前有效版本。引用后方案返回体中的 `method_ref` 是冻结快照（步骤、材料范围、暴露边界、版本号和发布时间），方法库后续改版不会影响该方案。
 
 ## 本地验证
 
@@ -42,6 +50,7 @@ go run ./cmd/workflowcheck --workflow register-specimen
 go run ./cmd/workflowcheck --workflow approve-prep-plan
 go run ./cmd/workflowcheck --workflow log-preparation
 go run ./cmd/workflowcheck --workflow release-for-study
+go run ./cmd/workflowcheck --workflow standard-method-library
 ```
 
 这些检查会启动临时 HTTP 处理器并调用真实公共路由。

@@ -12,6 +12,7 @@ type state struct {
 	plans     map[string]domain.PrepPlan
 	progress  map[string][]domain.ProgressEntry
 	releases  map[string]domain.ReleaseRecord
+	methods   map[string]domain.StandardMethod
 }
 
 type MemoryRepository struct {
@@ -26,16 +27,24 @@ func NewMemory() *MemoryRepository {
 			plans:     make(map[string]domain.PrepPlan),
 			progress:  make(map[string][]domain.ProgressEntry),
 			releases:  make(map[string]domain.ReleaseRecord),
+			methods:   make(map[string]domain.StandardMethod),
 		},
 	}
 }
 
+// Read runs a read-only transaction. Mutex is process-global so every
+// read sees a fully committed snapshot and concurrent mutations are
+// serialized into a deterministic total order.
 func (r *MemoryRepository) Read(fn func(*Mutation) error) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return fn(cloneMutation(r.state))
 }
 
+// Mutate runs a read-modify-commit transaction: the callback operates on a
+// deep copy and the committed snapshot is swapped in atomically. A callback
+// error leaves the committed state untouched, so concurrent callers always
+// get a deterministic success/conflict result, never a partial write.
 func (r *MemoryRepository) Mutate(fn func(*Mutation) error) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -54,12 +63,13 @@ func cloneMutation(source state) *Mutation {
 		plans:     make(map[string]domain.PrepPlan, len(source.plans)),
 		progress:  make(map[string][]domain.ProgressEntry, len(source.progress)),
 		releases:  make(map[string]domain.ReleaseRecord, len(source.releases)),
+		methods:   make(map[string]domain.StandardMethod, len(source.methods)),
 	}
 	for key, value := range source.specimens {
 		copied.specimens[key] = value
 	}
 	for key, value := range source.plans {
-		copied.plans[key] = value
+		copied.plans[key] = clonePlan(value)
 	}
 	for key, values := range source.progress {
 		copied.progress[key] = append([]domain.ProgressEntry(nil), values...)
@@ -67,7 +77,41 @@ func cloneMutation(source state) *Mutation {
 	for key, value := range source.releases {
 		copied.releases[key] = value
 	}
+	for key, value := range source.methods {
+		copied.methods[key] = cloneMethod(value)
+	}
 	return &Mutation{state: copied}
+}
+
+func clonePlan(value domain.PrepPlan) domain.PrepPlan {
+	if value.MethodRef == nil {
+		return value
+	}
+	frozen := *value.MethodRef
+	frozen.Steps = append([]domain.MethodStep(nil), value.MethodRef.Steps...)
+	frozen.Materials = append([]string(nil), value.MethodRef.Materials...)
+	value.MethodRef = &frozen
+	return value
+}
+
+func cloneMethod(value domain.StandardMethod) domain.StandardMethod {
+	versions := make([]domain.MethodVersion, len(value.Versions))
+	for i, version := range value.Versions {
+		clone := version
+		clone.Steps = append([]domain.MethodStep(nil), version.Steps...)
+		clone.Materials = append([]string(nil), version.Materials...)
+		if version.PublishedAt != nil {
+			stamp := *version.PublishedAt
+			clone.PublishedAt = &stamp
+		}
+		if version.RetiredAt != nil {
+			stamp := *version.RetiredAt
+			clone.RetiredAt = &stamp
+		}
+		versions[i] = clone
+	}
+	value.Versions = versions
+	return value
 }
 
 type Mutation struct {
@@ -163,4 +207,36 @@ func (m *Mutation) ReleaseForSpecimen(specimenID string) (domain.ReleaseRecord, 
 
 func (m *Mutation) PutRelease(value domain.ReleaseRecord) {
 	m.state.releases[value.ID] = value
+}
+
+func (m *Mutation) GetMethod(id string) (domain.StandardMethod, bool) {
+	value, ok := m.state.methods[id]
+	return value, ok
+}
+
+func (m *Mutation) FindMethodByCode(code string) (domain.StandardMethod, bool) {
+	for _, value := range m.state.methods {
+		if value.Code == code {
+			return value, true
+		}
+	}
+	return domain.StandardMethod{}, false
+}
+
+func (m *Mutation) ListMethods() []domain.StandardMethod {
+	values := make([]domain.StandardMethod, 0, len(m.state.methods))
+	for _, value := range m.state.methods {
+		values = append(values, value)
+	}
+	sort.Slice(values, func(i, j int) bool {
+		if values[i].CreatedAt.Equal(values[j].CreatedAt) {
+			return values[i].ID < values[j].ID
+		}
+		return values[i].CreatedAt.Before(values[j].CreatedAt)
+	})
+	return values
+}
+
+func (m *Mutation) PutMethod(value domain.StandardMethod) {
+	m.state.methods[value.ID] = value
 }
